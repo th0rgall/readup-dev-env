@@ -1,0 +1,25 @@
+# docker-compose.yml
+services:
+  readup:
+    image: readup-dev
+    container_name: ${CONTAINER_NAME:-readup-dev}
+    ports:
+      - 2222:22
+      - 443
+    volumes:
+      # Database persistence
+      - "${DATA_SOURCE:-readup-db-data}:/var/lib/postgresql/14/main"
+      # Volume to cache readup repositories
+      - readup-source:/home/dev/readup
+      # Deploy key or machine account key
+      - "${SSH_KEY_PATH}:/home/dev/.ssh/id_ed25519:ro"
+      - "${SSH_KEY_PATH_PUB}:/home/dev/.ssh/id_ed25519.pub:ro"
+      # Claude settings
+      - "${CLAUDE_PATH}:/home/dev/.claude"
+      - "${CLAUDE_PATH}.json:/home/dev/.claude.json"
+    restart: unless-stopped
+    env_file: .env
+
+volumes:
+  readup-db-data:
+  readup-source:
