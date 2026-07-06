@@ -4,24 +4,17 @@
 # development: PostgreSQL 14, .NET 10, Node 22, nginx (SSL proxy), PowerShell,
 # and Claude Code.
 #
-# VS Code access: use the VS Code Remote SSH extension to connect. The VS Code Server
-# binary and a set of useful extensions are pre-installed during the build so the
-# first connection is fast.
+# VS Code access: this image is intended to be used as a Dev Container (see
+# .devcontainer/devcontainer.json). The VS Code Dev Containers extension attaches
+# to the running container through the Docker socket — no SSH server required.
+# The VS Code Server and extensions are installed on first attach and cached in an
+# anonymous volume (see docker-compose.yml), so they are NOT baked into this image.
 #
-# Build context must be the dev-env repo root so the SSL certs can be copied in:
+# Build context must be the dev-env repo root so the SSL certs can be copied in.
+# Normally you don't build directly — the Dev Container / docker-compose does it —
+# but the equivalent manual build is:
 #
 #   docker build -f unified-dev-env/Dockerfile -t readup-dev .
-#
-# Run example (persist DB data and SSH keys):
-#
-#   docker run -d --name readup-dev \
-#     -p 2222:22 \
-#     -p 443:443 \
-#     -v readup-db-data:/var/lib/postgresql/14/main \
-#     -v ~/.ssh/readup-deploy:/home/dev/.ssh/id_ed25519:ro \
-#     readup-dev
-#
-# Connect from VS Code via Remote SSH:  ssh dev@localhost -p 2222  (password: dev)
 #
 # Bootstrap repos once inside the container:
 #   ~/bootstrap-repos.sh              # uses the bundled default repos.conf
@@ -40,7 +33,6 @@ RUN apt-get update && apt-get install -y \
 	curl \
 	wget \
 	git \
-	tmux \
 	build-essential \
 	ca-certificates \
 	gnupg \
@@ -48,7 +40,6 @@ RUN apt-get update && apt-get install -y \
 	sudo \
 	unzip \
 	jq \
-	openssh-server \
 	openssh-client \
 	&& locale-gen en_US.UTF-8 \
 	&& rm -rf /var/lib/apt/lists/*
@@ -97,23 +88,32 @@ RUN ARCH=$(uname -m) \
 # ── nginx ─────────────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y nginx && rm -rf /var/lib/apt/lists/*
 
+# ── zellij (terminal multiplexer) ─────────────────────────────────────────────
+# Not in Ubuntu apt; install the static musl binary from GitHub releases.
+# Used to run the dev servers in a persistent, headless (background) session
+# that Claude drives via `zellij --session dev action ...` (see CLAUDE.md).
+RUN ARCH=$(uname -m) \
+	&& case "$ARCH" in \
+	x86_64)  ZELLIJ_TARGET="x86_64-unknown-linux-musl"  ;; \
+	aarch64) ZELLIJ_TARGET="aarch64-unknown-linux-musl" ;; \
+	*) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+	esac \
+	&& curl -sL \
+	"https://github.com/zellij-org/zellij/releases/latest/download/zellij-${ZELLIJ_TARGET}.tar.gz" \
+	-o /tmp/zellij.tar.gz \
+	&& tar -xz -C /usr/local/bin -f /tmp/zellij.tar.gz zellij \
+	&& chmod +x /usr/local/bin/zellij \
+	&& rm /tmp/zellij.tar.gz
+
 # ── dev user ──────────────────────────────────────────────────────────────────
+# The VS Code Dev Containers extension attaches as this user over the Docker
+# socket (remoteUser in devcontainer.json), so no password / SSH login is needed.
 RUN useradd -m -s /bin/bash dev \
 	&& echo "dev ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
-	# Default password — only used for VS Code Remote SSH from localhost.
-	# Change or disable once you configure key-based auth.
-	&& echo "dev:dev" | chpasswd \
 	# Allow nginx (www-data) to traverse /home/dev to serve static files.
 	# useradd creates home dirs as 750; www-data needs the world-execute bit.
-	&& chmod o+x /home/dev
-
-# ── SSH server ────────────────────────────────────────────────────────────────
-RUN sed -i \
-	-e 's/^#\?PermitRootLogin.*/PermitRootLogin no/' \
-	-e 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' \
-	/etc/ssh/sshd_config \
-	&& ssh-keygen -A \
-	&& mkdir -p /run/sshd /var/log/postgresql
+	&& chmod o+x /home/dev \
+	&& mkdir -p /var/log/postgresql
 
 # ── SSL certificates (for nginx HTTPS proxy) ──────────────────────────────────
 # Build context = dev-env repo root.
@@ -138,77 +138,21 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | b
 # ── Claude Code ───────────────────────────────────────────────────────────────
 RUN . "$NVM_DIR/nvm.sh" && npm install -g @anthropic-ai/claude-code
 
-# ── VS Code Server (pre-installed for fast first connection) ──────────────────
-# Downloads the latest stable VS Code Server. If the connecting VS Code client
-# matches this build's commit, it skips the download entirely ("Reusing existing
-# installation"). If the client is newer, VS Code downloads its own matching
-# version into a separate commit directory — connection still works either way.
-RUN ARCH=$(uname -m) \
-	&& case "$ARCH" in \
-	x86_64)  VSCODE_ARCH="x64"   ;; \
-	aarch64) VSCODE_ARCH="arm64" ;; \
-	*) echo "Unsupported arch: $ARCH" && exit 1 ;; \
-	esac \
-	&& curl -sL \
-	"https://update.code.visualstudio.com/latest/server-linux-${VSCODE_ARCH}/stable" \
-	-o /tmp/vscode-server.tar.gz \
-	&& tar -xz -C /tmp/ -f /tmp/vscode-server.tar.gz \
-	&& COMMIT=$(jq -r '.commit' /tmp/vscode-server-linux-*/product.json) \
-	&& echo "VS Code Server commit: $COMMIT" \
-	&& DEST="$HOME/.vscode-server/bin/$COMMIT" \
-	&& mkdir -p "$DEST" \
-	&& mv /tmp/vscode-server-linux-*/* "$DEST/" \
-	# Sentinel file: tells VS Code Remote SSH the install is complete.
-	&& touch "$DEST/0" \
-	&& rm /tmp/vscode-server.tar.gz
-
-# ── VS Code Server extensions ─────────────────────────────────────────────────
-# Pre-populated into ~/.vscode-server/extensions/ so they are available on
-# first connection without needing to download.
-#
-# Extensions installed:
+# ── VS Code Server & extensions ───────────────────────────────────────────────
+# Deliberately NOT installed here. The VS Code Dev Containers extension installs
+# the matching VS Code Server on first attach, and the extensions listed under
+# customizations.vscode.extensions in .devcontainer/devcontainer.json:
 #   ms-dotnettools.vscode-dotnet-runtime  — .NET runtime acquisition (dep)
 #   ms-dotnettools.csharp                 — C# language support (Roslyn/OmniSharp)
 #   ms-dotnettools.csdevkit               — C# Dev Kit (enhanced tooling)
 #   biomejs.biome                         — Biome formatter/linter
+# The install is cached in an anonymous volume on ~/.vscode-server (docker-compose.yml)
+# so it survives container recreation and only downloads once.
 #
-# NOTE: ms-dotnettools.csdevkit is free for personal/open-source use but
-# requires a Microsoft account for commercial use.
-#
-# All four extensions ship native binaries and have platform-specific VSIX
-# packages on the marketplace. We detect the arch and request the matching
-# platform variant so arm64 and amd64 both get the correct binaries.
-# filterType 7 = extension ID,  filterType 23 = target platform.
-RUN ARCH=$(uname -m) \
-	&& case "$ARCH" in \
-	x86_64)  VSCODE_PLATFORM="linux-x64"   ;; \
-	aarch64) VSCODE_PLATFORM="linux-arm64" ;; \
-	*) echo "Unsupported arch: $ARCH" && exit 1 ;; \
-	esac \
-	&& for EXT_ID in \
-	ms-dotnettools.vscode-dotnet-runtime \
-	ms-dotnettools.csharp \
-	ms-dotnettools.csdevkit \
-	biomejs.biome ; \
-	do \
-	PUBLISHER="${EXT_ID%%.*}" ; \
-	NAME="${EXT_ID#*.}" ; \
-	VERSION=$(curl -s -X POST \
-	"https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1" \
-	-H "Content-Type: application/json" \
-	-H "Accept: application/json;api-version=7.2-preview.1" \
-	-d "{\"filters\":[{\"criteria\":[{\"filterType\":7,\"value\":\"${EXT_ID}\"},{\"filterType\":23,\"value\":\"${VSCODE_PLATFORM}\"}]}],\"flags\":529}" \
-	| jq -r '.results[0].extensions[0].versions[0].version') ; \
-	echo "Installing extension: $EXT_ID v$VERSION ($VSCODE_PLATFORM)" ; \
-	DEST="$HOME/.vscode-server/extensions/${PUBLISHER}.${NAME}-${VERSION}" ; \
-	mkdir -p "$DEST" ; \
-	curl -sL \
-	"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${PUBLISHER}/vsextensions/${NAME}/${VERSION}/vspackage?targetPlatform=${VSCODE_PLATFORM}" \
-	-o /tmp/ext.vsix ; \
-	unzip -q /tmp/ext.vsix "extension/*" -d /tmp/ext_tmp ; \
-	cp -r /tmp/ext_tmp/extension/. "$DEST/" ; \
-	rm -rf /tmp/ext.vsix /tmp/ext_tmp ; \
-	done
+# Create the directory dev-owned so Docker initializes the anonymous volume with
+# dev:dev ownership. Otherwise Docker creates the (empty) volume as root:root and
+# the dev user can't write the VS Code Server into it (mkdir: Permission denied).
+RUN mkdir -p /home/dev/.vscode-server
 
 # ── Symlink node/npm/npx/claude into system PATH (for root and non-login shells) ──
 USER root
@@ -219,18 +163,19 @@ RUN NODE_BIN_DIR="$(ls -d /home/dev/.nvm/versions/node/v22.*/bin 2>/dev/null | h
 	&& ln -sf "$NODE_BIN_DIR/claude" /usr/local/bin/claude
 
 # ── Bootstrap script and default repo config ──────────────────────────────────
-COPY --chown=dev:dev unified-dev-env/bootstrap-repos.sh /home/dev/bootstrap-repos.sh
-COPY --chown=dev:dev unified-dev-env/repos.conf         /home/dev/repos.conf
-COPY --chown=dev:dev unified-dev-env/start.sh           /home/dev/start.sh
-COPY --chown=dev:dev unified-dev-env/CLAUDE.md          /home/dev/CLAUDE.md
-RUN chmod +x /home/dev/bootstrap-repos.sh /home/dev/start.sh
+COPY --chown=dev:dev unified-dev-env/bootstrap-repos.sh    /home/dev/bootstrap-repos.sh
+COPY --chown=dev:dev unified-dev-env/repos.conf            /home/dev/repos.conf
+COPY --chown=dev:dev unified-dev-env/start.sh              /home/dev/start.sh
+COPY --chown=dev:dev unified-dev-env/swap-api-target.sh    /home/dev/swap-api-target.sh
+COPY --chown=dev:dev unified-dev-env/dev-layout.kdl        /home/dev/dev-layout.kdl
+COPY --chown=dev:dev unified-dev-env/CLAUDE.md             /home/dev/CLAUDE.md
+RUN chmod +x /home/dev/bootstrap-repos.sh /home/dev/start.sh /home/dev/swap-api-target.sh
 
 COPY unified-dev-env/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# 22   — SSH  (VS Code Remote SSH)
 # 443  — nginx HTTPS (Readup dev services)
 # 5432 — PostgreSQL (optional; expose if you need external DB access)
-EXPOSE 22 443 5432
+EXPOSE 443 5432
 
 ENTRYPOINT ["/entrypoint.sh"]

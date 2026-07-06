@@ -2,18 +2,21 @@
 services:
   readup:
     image: readup-dev
+    build:
+      # Build context = dev-env repo root, so the Dockerfile can COPY the SSL certs.
+      context: ..
+      dockerfile: unified-dev-env/Dockerfile
     container_name: ${CONTAINER_NAME:-readup-dev}
     ports:
-      - 2222:22
-      - 443
+      - 443:443
     volumes:
       # Database persistence
-      - "${DATA_SOURCE:-readup-db-data}:/var/lib/postgresql/14/main"
+      - ./db:/var/lib/postgresql/14/main
       # Volume to cache readup repositories
-      - readup-source:/home/dev/readup
-      # Deploy key or machine account key
-      - "${SSH_KEY_PATH}:/home/dev/.ssh/id_ed25519:ro"
-      - "${SSH_KEY_PATH_PUB}:/home/dev/.ssh/id_ed25519.pub:ro"
+      - ./src:/home/dev/readup
+      # Anonymous volume caching the VS Code Server + extensions installed on
+      # first attach, so they survive container recreation and only download once.
+      - /home/dev/.vscode-server
       # Claude settings
       - "${CLAUDE_PATH}:/home/dev/.claude"
       - "${CLAUDE_PATH}.json:/home/dev/.claude.json"
@@ -22,4 +25,3 @@ services:
 
 volumes:
   readup-db-data:
-  readup-source:

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start all Readup dev services in a persistent tmux session.
+# Start all Readup dev services in a persistent, headless zellij session.
 #
 # Usage:
 #   ~/start.sh        # start everything
@@ -8,12 +8,18 @@
 #   - Repos cloned under ~/readup/ (run ~/bootstrap-repos.sh if not)
 #   - API and web repos configured per their own READMEs
 #   - Container started with port 443 mapped to host port 443
+#
+# The zellij session "dev" is created from ~/dev-layout.kdl, which starts the API
+# and web build watcher in their own tabs (panes terminal_1 and terminal_2). Each
+# server writes a PID file to ~/.pids/ and logs to ~/.logs/. See CLAUDE.md.
 
 set -euo pipefail
 
 READUP_DIR="$HOME/readup"
 PIDS_DIR="$HOME/.pids"
+LOGS_DIR="$HOME/.logs"
 SESSION="dev"
+LAYOUT="$HOME/dev-layout.kdl"
 
 # ── Sanity checks ──────────────────────────────────────────────────────────────
 if [ ! -d "$READUP_DIR/api" ] || [ ! -d "$READUP_DIR/web" ]; then
@@ -22,17 +28,7 @@ if [ ! -d "$READUP_DIR/api" ] || [ ! -d "$READUP_DIR/web" ]; then
     exit 1
 fi
 
-mkdir -p "$PIDS_DIR"
-
-# ── tmux session ───────────────────────────────────────────────────────────────
-if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "Creating tmux session '$SESSION'..."
-    tmux new-session -d -s "$SESSION" -n orchestrator
-    tmux new-window  -t "$SESSION" -n api
-    tmux new-window  -t "$SESSION" -n web-build
-else
-    echo "Reusing existing tmux session '$SESSION'."
-fi
+mkdir -p "$PIDS_DIR" "$LOGS_DIR"
 
 # ── PostgreSQL ─────────────────────────────────────────────────────────────────
 # Normally started by the container entrypoint; verify it's up before proceeding.
@@ -50,21 +46,21 @@ if [ -d "$READUP_DIR/db" ] && [ ! -e /db ]; then
     sudo ln -sf "$READUP_DIR/db" /db
 fi
 
-# ── API ────────────────────────────────────────────────────────────────────────
-echo "Starting API..."
-tmux send-keys -t "$SESSION:api" \
-    "cd $READUP_DIR/api && ASPNETCORE_ENVIRONMENT=Development dotnet run --project api.csproj & echo \$! > $PIDS_DIR/api.pid" \
-    Enter
+# ── zellij session (starts API + web build watcher via the layout) ─────────────
+# Query the session directly (ANSI-colored `list-sessions` output breaks grep -w).
+if zellij --session "$SESSION" action list-panes >/dev/null 2>&1; then
+    echo "Reusing existing zellij session '$SESSION'."
+else
+    echo "Creating headless zellij session '$SESSION' (starts api + web-build)..."
+    # Clear any EXITED session of the same name first: `attach --create-background`
+    # would otherwise resurrect it with its old layout instead of $LAYOUT.
+    zellij delete-session "$SESSION" --force 2>/dev/null || true
+    zellij attach --create-background "$SESSION" options --default-layout "$LAYOUT"
+fi
 
-# ── Web build watcher ──────────────────────────────────────────────────────────
-echo "Starting web build watcher..."
-tmux send-keys -t "$SESSION:web-build" \
-    "cd $READUP_DIR/web && NODE_ENV=development NODE_EXTRA_CA_CERTS=/etc/ssl/dev.readup.org.cer NODE_OPTIONS=--openssl-legacy-provider npx gulp watch:dev:app & echo \$! > $PIDS_DIR/web-build.pid" \
-    Enter
-
-# ── Wait for initial bundle before starting the server ────────────────────────
+# ── Wait for initial bundle before reloading nginx ─────────────────────────────
 echo "Waiting 25s for initial web bundle compilation..."
-echo "(Watch progress: tmux attach -t $SESSION -w web-build)"
+echo "(Watch progress: tail -f $LOGS_DIR/web-build.log)"
 sleep 25
 
 # ── nginx ──────────────────────────────────────────────────────────────────────
@@ -80,7 +76,7 @@ for svc in api web-build; do
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         echo "  $svc: running (pid $PID)"
     else
-        echo "  $svc: DOWN — check: tmux attach -t $SESSION -w $svc"
+        echo "  $svc: DOWN — check: tail -n 50 $LOGS_DIR/$svc.log"
     fi
 done
 
@@ -90,5 +86,5 @@ echo "  Web:    https://dev.readup.org"
 echo "  API:    https://api.dev.readup.org"
 echo "  Static: https://static.dev.readup.org"
 echo ""
-echo "Attach to session:  tmux attach -t $SESSION"
-echo "Read logs:          tmux capture-pane -t $SESSION:<window> -p -S -200"
+echo "Attach to session:  zellij attach $SESSION"
+echo "Read logs:          tail -f $LOGS_DIR/<service>.log"

@@ -1,0 +1,43 @@
+// Zellij layout for the Readup dev session (see CLAUDE.md).
+//
+// Launched headless (no terminal attached) by start.sh:
+//   zellij attach --create-background dev options --default-layout ~/dev-layout.kdl
+//
+// Tabs — terminal panes are numbered from 0 in creation order, so:
+//   orchestrator  → terminal_0  — spare shell (Claude usually drives from its own shell)
+//   api           → terminal_1  — ASP.NET Core API (port 5000)
+//   web-build     → terminal_2  — gulp watch:dev:app (webpack build watcher)
+//
+// Each server pane writes its PID to ~/.pids/<svc>.pid and tees output to
+// ~/.logs/<svc>.log. `exec` makes the shell become the server process, so the
+// recorded PID is the server itself. Because these are command panes, pressing
+// Enter (zellij action write ... 13) in a pane re-runs it after it exits.
+
+layout {
+    // Restore zellij's default UI chrome. A custom layout replaces the built-in
+    // default, so without this template there is no tab bar (top) and no status
+    // bar with shortcut hints (bottom). `children` is where each tab's panes go.
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+
+    tab name="orchestrator" {
+        pane name="orchestrator"
+    }
+    tab name="api" focus=false {
+        pane name="api" command="bash" {
+            args "-lc" "mkdir -p ~/.pids ~/.logs && echo $$ > ~/.pids/api.pid && cd ~/readup/api && exec env ASPNETCORE_ENVIRONMENT=Development dotnet run --project api.csproj > ~/.logs/api.log 2>&1"
+        }
+    }
+    tab name="web-build" focus=false {
+        pane name="web-build" command="bash" {
+            args "-lc" "mkdir -p ~/.pids ~/.logs && echo $$ > ~/.pids/web-build.pid && cd ~/readup/web && exec env NODE_ENV=development NODE_EXTRA_CA_CERTS=/etc/ssl/dev.readup.org.cer NODE_OPTIONS=--openssl-legacy-provider npx gulp watch:dev:app > ~/.logs/web-build.log 2>&1"
+        }
+    }
+}

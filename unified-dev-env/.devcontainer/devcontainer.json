@@ -1,0 +1,41 @@
+{
+  // Readup unified dev environment as a VS Code Dev Container.
+  //
+  // The Dev Containers extension builds the image via docker-compose and attaches
+  // to the running container over the Docker socket (docker exec) — no SSH server.
+  // The VS Code Server and the extensions below are installed on first attach and
+  // cached in the anonymous /home/dev/.vscode-server volume (see docker-compose.yml).
+  "name": "Readup Unified Dev Environment",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "readup",
+  "workspaceFolder": "/home/dev/readup",
+  "remoteUser": "dev",
+  // Leave the container running when VS Code disconnects
+  "shutdownAction": "none",
+  // Clone/update the readup repos. Runs once, after the container is first
+  // created (and again after a rebuild) — bootstrap-repos.sh is idempotent, so
+  // this is always safe: it never re-clones or force-changes an existing repo,
+  // it only warns if a repo's origin/branch has drifted from repos.conf.
+  "postCreateCommand": "~/bootstrap-repos.sh",
+  // Start Postgres-dependent dev servers (api + web build) in the zellij "dev"
+  // session. Runs every time the container starts, so the servers always come
+  // up without a manual step.
+  "postStartCommand": "~/start.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dotnettools.vscode-dotnet-runtime",
+        "ms-dotnettools.csharp",
+        "ms-dotnettools.csdevkit",
+        "biomejs.biome"
+      ]
+    }
+  },
+  // Disable SSH agent passthrough: no agent socket is mounted, and we clear
+  // SSH_AUTH_SOCK so nothing in the container can reach a forwarded agent. (The
+  // devcontainer CLI doesn't forward the agent by default; this also covers the
+  // case of the project later being opened in an editor that would.)
+  "remoteEnv": {
+    "SSH_AUTH_SOCK": ""
+  }
+}

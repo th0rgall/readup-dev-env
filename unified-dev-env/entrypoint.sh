@@ -6,6 +6,16 @@ PG_DATA="/var/lib/postgresql/$PG_VERSION/main"
 PG_CTL="/usr/lib/postgresql/$PG_VERSION/bin/pg_ctl"
 PG_INITDB="/usr/lib/postgresql/$PG_VERSION/bin/initdb"
 
+# ── VS Code Server volume ownership ───────────────────────────────────────────
+# ~/.vscode-server is an anonymous volume (docker-compose.yml). If Docker created
+# it empty as root:root, the dev user can't install the VS Code Server into it on
+# attach ("mkdir: Permission denied"). Self-heal the ownership if it's not dev's.
+VSCODE_SERVER_DIR=/home/dev/.vscode-server
+if [ -d "$VSCODE_SERVER_DIR" ] && [ "$(stat -c '%U' "$VSCODE_SERVER_DIR")" != "dev" ]; then
+    echo "[init] Fixing ownership of $VSCODE_SERVER_DIR -> dev:dev"
+    chown dev:dev "$VSCODE_SERVER_DIR"
+fi
+
 # ── PostgreSQL ────────────────────────────────────────────────────────────────
 mkdir -p /var/log/postgresql
 chown postgres:postgres /var/log/postgresql
@@ -47,22 +57,14 @@ if [ -d /home/dev/readup/db ] && [ ! -e /db ]; then
     echo "[init] Created /db -> /home/dev/readup/db symlink."
 fi
 
-# ── SSH deploy key ─────────────────────────────────────────────────────────────
-# Volume-map your own key to /home/dev/.ssh/id_ed25519 to skip generation.
-# Example: -v ~/.ssh/readup-deploy:/home/dev/.ssh/id_ed25519:ro
-SSH_KEY=/home/dev/.ssh/id_ed25519
-if [ ! -f "$SSH_KEY" ]; then
-    echo "[init] No SSH key found — generating one..."
-    install -d -o dev -g dev -m 700 /home/dev/.ssh
-    sudo -u dev ssh-keygen -t ed25519 -C "readup-dev@$(hostname)" \
-        -f "$SSH_KEY" -N ""
-    echo ""
-    echo "══════════════════════════════════════════════════════════"
-    echo "  Generated SSH public key (add to GitHub for git push):"
-    echo "══════════════════════════════════════════════════════════"
-    cat "${SSH_KEY}.pub"
-    echo "══════════════════════════════════════════════════════════"
-    echo ""
+# ── /etc/hosts for in-container SSR ───────────────────────────────────────────
+# The web app's server-side renderer calls the API/static/web services by
+# hostname (see web/src/app/server/config.dev.json). nginx terminates TLS for all
+# of them on 443 inside this same container, so resolve them to localhost.
+# Without this the SSR fetch fails and the web server (port 5001) crashes → 502.
+if ! grep -q "api.dev.readup.org" /etc/hosts; then
+    echo "[init] Adding *.dev.readup.org -> 127.0.0.1 to /etc/hosts"
+    echo "127.0.0.1 dev.readup.org api.dev.readup.org static.dev.readup.org blog.dev.readup.org article-test.dev.readup.org prodproxy.dev.readup.org" >> /etc/hosts
 fi
 
 # ── nginx ─────────────────────────────────────────────────────────────────────
@@ -73,8 +75,7 @@ echo ""
 echo "┌──────────────────────────────────────────────────────────────┐"
 echo "│  Readup unified dev environment ready                         │"
 echo "│                                                               │"
-echo "│  VS Code Remote SSH  →  ssh dev@localhost -p <mapped-port>   │"
-echo "│    user: dev  /  password: dev                                │"
+echo "│  Attach with VS Code Dev Containers (via the Docker socket).  │"
 echo "│                                                               │"
 echo "│  Bootstrap repos  →  ~/bootstrap-repos.sh                    │"
 echo "│                                                               │"
@@ -82,6 +83,6 @@ echo "│  Readup HTTPS  →  https://dev.readup.org  (after hosts setup) │"
 echo "└──────────────────────────────────────────────────────────────┘"
 echo ""
 
-# Run sshd in the foreground — this keeps the container alive and provides
-# the VS Code Remote SSH connection point.
-exec /usr/sbin/sshd -D
+# Keep the container alive as PID 1. The VS Code Dev Containers extension attaches
+# over the Docker socket (docker exec), so there is no foreground server to run.
+exec sleep infinity
